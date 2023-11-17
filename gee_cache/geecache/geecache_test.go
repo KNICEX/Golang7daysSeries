@@ -2,39 +2,54 @@ package geecache
 
 import (
 	"fmt"
+	"gee_cache/geecache/singleflight"
 	"log"
 	"sync"
 	"testing"
 	"time"
 )
 
-var db = map[string]string{
-	"Tom":  "12312",
-	"Jack": "123123124",
-	"Sam":  "3412412",
+var db = make(map[string]string, 1000)
+
+func initDB() {
+	for i := 0; i < 30; i++ {
+		db[fmt.Sprintf("key%d", i)] = fmt.Sprintf("value%d", i)
+	}
 }
 
-func TestGet(t *testing.T) {
+func TestBatch(t *testing.T) {
+	initDB()
+	itemGet(t)
+	start := time.Now()
+	for i := 3; i > 0; i-- {
+		itemGet(t)
+	}
+	fmt.Println("average time ", time.Since(start)/3)
+}
+
+func itemGet(t *testing.T) {
 	loadCounts := make(map[string]int, len(db))
 
 	var mutex sync.RWMutex
 
-	gee := NewGroup("score", 1024, GetterFunc(
+	gee := NewKGroup("score", 2<<10, 3, 0, GetterFunc(
 		func(key string) ([]byte, error) {
 			log.Println("[SlowDB] search key: ", key)
 			mutex.Lock()
 			loadCounts[key]++
 			mutex.Unlock()
-			time.Sleep(time.Millisecond * 20)
+			time.Sleep(time.Millisecond * 40)
 			if v, ok := db[key]; ok {
 				return []byte(v), nil
+			} else {
+				return nil, fmt.Errorf("not found key %s", key)
 			}
-			return make([]byte, 0), fmt.Errorf("not found")
 		},
 	))
+	gee.Loader(singleflight.NewWGLoader())
 	start := time.Now()
 	var n sync.WaitGroup
-	for i := 3000; i > 0; i-- {
+	for i := 300; i > 0; i-- {
 		go func() {
 			n.Add(1)
 			for k, v := range db {
@@ -53,11 +68,3 @@ func TestGet(t *testing.T) {
 }
 
 var lock sync.RWMutex
-
-func TestSync(t *testing.T) {
-	lock.RLock()
-	lock.Lock()
-	lock.Unlock()
-	lock.RUnlock()
-
-}

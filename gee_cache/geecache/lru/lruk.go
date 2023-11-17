@@ -49,11 +49,17 @@ func (k *KCache) Add(key string, value Value) {
 				// 从history移除
 				k.hl.Remove(history)
 				delete(k.history, history.Value.(*historyEntry).key)
+			} else {
+				k.hl.MoveToFront(history)
 			}
 		} else {
 			// 添加进history
-			ele := k.hl.PushFront(&historyEntry{key: key, count: 1})
-			k.history[key] = ele
+			if k.k == 1 {
+				k.Cache.add(key, value)
+			} else {
+				ele := k.hl.PushFront(&historyEntry{key: key, count: 1})
+				k.history[key] = ele
+			}
 			if k.maxHistory != 0 && k.hl.Len() > k.maxHistory {
 				k.RemoveOldestHistory()
 			}
