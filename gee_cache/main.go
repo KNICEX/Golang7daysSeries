@@ -40,15 +40,14 @@ func startAPIServer(apiAddr string, gee *geecache.Group) {
 		w.Write(view.ByteSlice())
 	})
 	log.Println("frontend server is running at ", apiAddr)
-	log.Fatal(http.ListenAndServe(apiAddr[7:], nil))
+	log.Fatal(http.ListenAndServe(apiAddr, nil))
 }
 
 func startCacheServer(addr string, addrs []string, gee *geecache.Group) {
-	peers := geecache.NewHTTPPool(addr)
+	peers := geecache.NewGrpcPool(addr)
 	peers.SetPeers(addrs...)
 	gee.RegisterPeers(peers)
-	log.Println("geecache is running at ", addr)
-	log.Fatal(http.ListenAndServe(addr[7:], peers))
+	peers.Run()
 }
 
 func main() {
@@ -58,11 +57,11 @@ func main() {
 	flag.BoolVar(&api, "api", false, "Start an api server?")
 	flag.Parse()
 
-	apiAddr := "http://localhost:9999"
+	apiAddr := "localhost:9999"
 	addrMap := map[int]string{
-		8001: "http://localhost:8001",
-		8002: "http://localhost:8002",
-		8003: "http://localhost:8003",
+		8001: "localhost:8001",
+		8002: "localhost:8002",
+		8003: "localhost:8003",
 	}
 
 	var addrs []string
