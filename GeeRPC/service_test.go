@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 )
 
 type Foo int
@@ -42,4 +43,26 @@ func TestMethodType_Call(t *testing.T) {
 	err := s.call(mType, argv, replyv)
 	_assert(err == nil && *replyv.Interface().(*int) == 4 && mType.NumCalls() == 1,
 		"failed to call Foo.Sum ")
+}
+
+func TestChan(t *testing.T) {
+	c1 := make(chan struct{})
+	c2 := make(chan struct{})
+	go func() {
+		fmt.Println("exec goroutine")
+		time.Sleep(time.Second * 2)
+		close(c1)
+		fmt.Println("send message")
+		close(c2)
+		fmt.Println("end goroutine")
+	}()
+
+	select {
+	case <-time.After(time.Second):
+		fmt.Println("timeout")
+	case <-c1:
+		<-c2
+	}
+	time.Sleep(time.Second * 3)
+	fmt.Println("end main")
 }

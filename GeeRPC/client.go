@@ -1,6 +1,7 @@
 package geerpc
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -168,23 +171,6 @@ func parseOptions(opts ...*Option) (*Option, error) {
 	return opt, nil
 }
 
-//func Dial(network, address string, opts ...*Option) (client *Client, err error) {
-//	opt, err := parseOptions(opts...)
-//	if err != nil {
-//		return nil, err
-//	}
-//	conn, err := net.Dial(network, address)
-//	if err != nil {
-//		return nil, err
-//	}
-//	defer func() {
-//		if client == nil {
-//			_ = conn.Close()
-//		}
-//	}()
-//	return NewClient(conn, opt)
-//}
-
 func (client *Client) send(call *Call) {
 	client.sending.Lock()
 	defer client.sending.Unlock()
@@ -227,20 +213,28 @@ func (client *Client) Go(serviceMethod string, args, reply any, done chan *Call)
 }
 
 func (client *Client) CallWithCxt(ctx context.Context, serviceMethod string, args, reply any) error {
-	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
-	select {
-	case <-ctx.Done():
-		// 用户叫停
-		client.removeCall(call.Seq)
-		return errors.New("rpc client: call failed: " + ctx.Err().Error())
-	case call := <-call.Done:
-		return call.Error
-	}
+	return client.call(ctx, serviceMethod, args, reply)
 }
 
 func (client *Client) Call(serviceMethod string, args, reply any) error {
-	call := <-client.Go(serviceMethod, args, reply, make(chan *Call, 1)).Done
-	return call.Error
+	return client.call(nil, serviceMethod, args, reply)
+}
+
+func (client *Client) call(ctx context.Context, serviceMethod string, args, reply any) error {
+	call := client.Go(serviceMethod, args, reply, make(chan *Call, 1))
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			// 用户叫停
+			client.removeCall(call.Seq)
+			return errors.New("rpc client: call failed: " + ctx.Err().Error())
+		case call := <-call.Done:
+			return call.Error
+		}
+	} else {
+		call := <-call.Done
+		return call.Error
+	}
 }
 
 type clientResult struct {
@@ -256,13 +250,16 @@ func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (cli
 		return nil, err
 	}
 	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
 		if err != nil {
 			_ = conn.Close()
 		}
 	}()
 
-	ch := make(chan clientResult)
+	ch := make(chan clientResult, 1)
 	go func() {
 		client, err := f(conn, opt)
 		ch <- clientResult{client: client, err: err}
@@ -274,7 +271,7 @@ func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (cli
 
 	select {
 	case <-time.After(opt.ConnectTimeout):
-		return nil, fmt.Errorf("rpc server: connect time out: expect within %s \n", opt.ConnectTimeout)
+		return nil, fmt.Errorf("rpc server: connect timeout: expect within %s \n", opt.ConnectTimeout)
 	case result := <-ch:
 		return result.client, result.err
 	}
@@ -282,4 +279,38 @@ func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (cli
 
 func Dial(network, address string, opt ...*Option) (*Client, error) {
 	return dialTimeout(NewClient, network, address, opt...)
+}
+
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+
+	// 读取响应头
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	if err == nil {
+		err = errors.New("unexpected HTTP response: " + resp.Status)
+	}
+	return nil, err
+}
+
+func DialHTTP(network, addr string, opt ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, addr, opt...)
+}
+
+func XDial(rpcAddr string, opt ...*Option) (*Client, error) {
+	parts := strings.Split(rpcAddr, "@")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s', expected protocol@addr", rpcAddr)
+	}
+
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		return DialHTTP("tcp", addr, opt...)
+	default:
+		// tcp unix ...
+		return Dial(protocol, addr, opt...)
+	}
 }

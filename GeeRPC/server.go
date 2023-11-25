@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -172,35 +173,30 @@ func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.
 	called := make(chan struct{})
 	sent := make(chan struct{})
 	var sendOnce sync.Once
+	sendResponseOnce := func(response any) {
+		sendOnce.Do(func() {
+			server.sendResponse(cc, req.h, response, sending)
+		})
+	}
 	go func() {
 		err := req.svc.call(req.mtype, req.argv, req.replyv)
-		called <- struct{}{}
+		close(called)
 		if err != nil {
 			req.h.Error = err.Error()
-			sendOnce.Do(func() {
-				server.sendResponse(cc, req.h, invalidRequest, sending)
-			})
-			sent <- struct{}{}
+			sendResponseOnce(invalidRequest)
+			close(sent)
 			return
 		}
-		sendOnce.Do(func() {
-			server.sendResponse(cc, req.h, invalidRequest, sending)
-		})
-		sent <- struct{}{}
+		sendResponseOnce(req.replyv.Interface())
+		close(sent)
 	}()
 	if timeout == 0 {
-		<-called
-		<-sent
 		return
 	}
 	select {
 	case <-time.After(timeout):
-		req.h.Error = fmt.Sprintf("rpc server: request handle tiemout: expect within %s", timeout)
-		sendOnce.Do(func() {
-			server.sendResponse(cc, req.h, invalidRequest, sending)
-		})
-		<-called
-		<-sent
+		req.h.Error = fmt.Sprintf("rpc server: request handle timeout: expect within %s", timeout)
+		sendResponseOnce(invalidRequest)
 	case <-called:
 		<-sent
 	}
@@ -224,4 +220,41 @@ func (server *Server) findService(serviceMethod string) (svc *service, mtype *me
 		err = errors.New("rpc server: can't find method " + methodName)
 	}
 	return
+}
+
+//	http /path -> ServeHTTP -> get tcp conn
+//									|--> serveTcp
+
+const (
+	connected        = "200 Connected to Gee RPC"
+	defaultRPCPath   = "/_geerpc_"
+	defaultDebugPath = "/debug/geerpc"
+)
+
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodConnect {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+
+	// 拿到http下面的tcp连接
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Println("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	server.ServeConn(conn)
+}
+
+func (server *Server) handleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path: ", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.handleHTTP()
 }
